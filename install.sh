@@ -29,6 +29,8 @@ WorkingDirectory=$APP_DIR
 Restart=always
 RestartSec=3
 User=root
+KillSignal=SIGTERM
+TimeoutStopSec=5
 
 [Install]
 WantedBy=sysinit.target
@@ -46,6 +48,8 @@ sudo systemctl restart dimmer.service
 echo
 echo "[DONE] Dimmer installed."
 echo "[INFO] Service is configured to start early during boot."
+echo "[INFO] Python is running with -u for unbuffered logs."
+echo "[INFO] Service uses SIGTERM so the script can set exit brightness cleanly."
 echo "[INFO] I2C was enabled, reboot is needed."
 echo
 echo "Check service status later with:"

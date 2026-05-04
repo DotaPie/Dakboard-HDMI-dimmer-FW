@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import os
+import signal
 import subprocess
+import sys
 import time
 from threading import Lock
 
@@ -29,7 +31,13 @@ BRIGHTNESS_IDLE = 0.2
 BRIGHTNESS_MIN = 0.2
 BRIGHTNESS_MAX = 1.5
 
+# What brightness to set when service stops/restarts/reboots.
+# You said you changed this to max brightness.
+BRIGHTNESS_ON_EXIT = BRIGHTNESS_MAX
+
 # Light sensor scaling
+# Sensor values below LIGHT_LUX_MIN map to BRIGHTNESS_MIN.
+# Sensor values above LIGHT_LUX_MAX map to BRIGHTNESS_MAX.
 LIGHT_LUX_MIN = 0
 LIGHT_LUX_MAX = 20
 
@@ -46,6 +54,7 @@ LIGHT_READ_SECONDS = 0.25
 PIR_STARTUP_IGNORE_SECONDS = 5
 
 # PIR false-trigger filtering
+# After PIR says "motion", confirm it is still active several times.
 PIR_CONFIRM_SAMPLES = 3
 PIR_CONFIRM_SAMPLE_DELAY = 0.02
 
@@ -75,6 +84,7 @@ target_brightness = BRIGHTNESS_IDLE
 current_brightness = BRIGHTNESS_IDLE
 last_motion_time = 0.0
 script_start_time = time.monotonic()
+running = True
 
 pir = None
 state_lock = Lock()
@@ -139,17 +149,22 @@ def set_display_brightness(value, log_errors=True):
 def wait_for_display_ready():
     print("[START] Waiting for display/xrandr to become ready...")
 
-    while True:
+    while running:
         if set_display_brightness(BRIGHTNESS_IDLE, log_errors=False):
             print(f"[START] Display ready, brightness set to idle {BRIGHTNESS_IDLE:.2f}")
-            return
+            return True
 
         time.sleep(XRANDR_STARTUP_RETRY_SECONDS)
 
+    return False
+
 
 def read_bh1750_lux(bus):
+    # BH1750 returns 2 bytes.
     data = bus.read_i2c_block_data(BH1750_ADDR, BH1750_CONTINUOUS_HIGH_RES_MODE, 2)
     raw = (data[0] << 8) | data[1]
+
+    # Per BH1750 datasheet: lux = raw / 1.2
     return raw / 1.2
 
 
@@ -192,6 +207,8 @@ def motion_detected():
         print("[MOTION] Ignored, PIR not initialized yet")
         return
 
+    # Confirm PIR signal with quick repeated samples.
+    # This helps ignore very short false triggers.
     for sample in range(PIR_CONFIRM_SAMPLES):
         if not pir.motion_detected:
             print(f"[MOTION] Ignored false trigger, sample {sample + 1} was low")
@@ -205,6 +222,12 @@ def motion_detected():
     print("[MOTION] Confirmed, timer reset")
 
 
+def handle_shutdown_signal(signum, frame):
+    global running
+    print(f"[STOP] Received signal {signum}, shutting down")
+    running = False
+
+
 def main():
     global target_brightness
     global current_brightness
@@ -216,7 +239,8 @@ def main():
         current_brightness = BRIGHTNESS_IDLE
         target_brightness = BRIGHTNESS_IDLE
 
-    wait_for_display_ready()
+    if not wait_for_display_ready():
+        return
 
     pir = MotionSensor(PIR_GPIO)
     pir.when_motion = motion_detected
@@ -233,16 +257,19 @@ def main():
         print("[READY] Sensors initialized")
         print(f"[CONFIG] Brightness idle: {BRIGHTNESS_IDLE:.2f}")
         print(f"[CONFIG] Brightness max: {BRIGHTNESS_MAX:.2f}")
+        print(f"[CONFIG] Brightness on exit: {BRIGHTNESS_ON_EXIT:.2f}")
         print(f"[CONFIG] Brightness step: {BRIGHTNESS_STEP:.2f}")
+        print(f"[CONFIG] Light read interval: {LIGHT_READ_SECONDS:.2f}s")
         print(
             f"[CONFIG] PIR confirm: {PIR_CONFIRM_SAMPLES} samples, "
             f"{PIR_CONFIRM_SAMPLE_DELAY:.3f}s apart"
         )
         print(f"[CONFIG] PIR startup ignore: {PIR_STARTUP_IGNORE_SECONDS}s")
 
-        while True:
+        while running:
             now = time.monotonic()
 
+            # Read light sensor periodically.
             if now - last_light_read >= LIGHT_READ_SECONDS:
                 last_light_read = now
 
@@ -274,8 +301,12 @@ def main():
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+
     try:
         main()
-    except KeyboardInterrupt:
-        print("\n[STOP] Exiting, setting display to max brightness")
-        set_display_brightness(BRIGHTNESS_MAX)
+    finally:
+        print(f"[STOP] Exiting, setting display brightness to {BRIGHTNESS_ON_EXIT:.2f}")
+        set_display_brightness(BRIGHTNESS_ON_EXIT)
+        sys.exit(0)

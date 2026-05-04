@@ -24,7 +24,7 @@ Before=display-manager.service graphical.target multi-user.target
 [Service]
 Type=simple
 ExecStartPre=/bin/sleep 1
-ExecStart=/usr/bin/python3.11 $APP_DIR/dimmer.py
+ExecStart=/usr/bin/python3.11 -u $APP_DIR/dimmer.py
 WorkingDirectory=$APP_DIR
 Restart=always
 RestartSec=3

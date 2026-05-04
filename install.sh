@@ -17,10 +17,13 @@ echo "[INSTALL] Creating systemd service..."
 sudo tee "$SERVICE_FILE" > /dev/null <<EOF
 [Unit]
 Description=HDMI Display Dimmer
-After=multi-user.target
+DefaultDependencies=no
+After=local-fs.target systemd-udev-settle.service
+Before=display-manager.service graphical.target multi-user.target
 
 [Service]
 Type=simple
+ExecStartPre=/bin/sleep 1
 ExecStart=/usr/bin/python3.11 $APP_DIR/dimmer.py
 WorkingDirectory=$APP_DIR
 Restart=always
@@ -28,16 +31,21 @@ RestartSec=3
 User=root
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=sysinit.target
 EOF
 
 echo "[INSTALL] Enabling and starting service..."
 sudo systemctl daemon-reload
+
+# Disable old enable target if it was previously installed differently.
+sudo systemctl disable dimmer.service 2>/dev/null || true
+
 sudo systemctl enable dimmer.service
 sudo systemctl restart dimmer.service
 
 echo
 echo "[DONE] Dimmer installed."
+echo "[INFO] Service is configured to start early during boot."
 echo "[INFO] I2C was enabled, reboot is needed."
 echo
 echo "Check service status later with:"

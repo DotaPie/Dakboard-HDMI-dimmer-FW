@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import subprocess
 import time
 from threading import Lock
@@ -15,28 +16,36 @@ from gpiozero import MotionSensor
 DISPLAY = ":0"
 XRANDR_OUTPUT = "HDMI-1"
 
+# Optional.
+# If service runs as root and xrandr has auth problems, set this to the real user's Xauthority.
+# Common values:
+#   /home/pi/.Xauthority
+#   /home/dakboard/.Xauthority
+# Leave as None if not needed.
+XAUTHORITY = None
+
 # Brightness limits
 BRIGHTNESS_IDLE = 0.2
 BRIGHTNESS_MIN = 0.2
 BRIGHTNESS_MAX = 1.5
 
 # Light sensor scaling
-# Tune these based on your room.
-# Sensor values below LIGHT_LUX_MIN map to BRIGHTNESS_MIN.
-# Sensor values above LIGHT_LUX_MAX map to BRIGHTNESS_MAX.
 LIGHT_LUX_MIN = 0
 LIGHT_LUX_MAX = 20
 
 # Brightness transition
-BRIGHTNESS_STEP = 0.04
+BRIGHTNESS_STEP = 0.06
 
 # Time behavior
 DISPLAY_ON_SECONDS = 30
 LOOP_SLEEP_SECONDS = 0.025
 LIGHT_READ_SECONDS = 0.25
 
+# Ignore PIR immediately after startup.
+# PIR sensors often need a moment to stabilize.
+PIR_STARTUP_IGNORE_SECONDS = 5
+
 # PIR false-trigger filtering
-# After PIR says "motion", confirm it is still active several times.
 PIR_CONFIRM_SAMPLES = 3
 PIR_CONFIRM_SAMPLE_DELAY = 0.02
 
@@ -44,6 +53,9 @@ PIR_CONFIRM_SAMPLE_DELAY = 0.02
 I2C_BUS = 1
 BH1750_ADDR = 0x23
 PIR_GPIO = 24
+
+# Wait for X/xrandr to become usable
+XRANDR_STARTUP_RETRY_SECONDS = 0.5
 
 
 # =========================
@@ -62,6 +74,7 @@ BH1750_CONTINUOUS_HIGH_RES_MODE = 0x10
 target_brightness = BRIGHTNESS_IDLE
 current_brightness = BRIGHTNESS_IDLE
 last_motion_time = 0.0
+script_start_time = time.monotonic()
 
 pir = None
 state_lock = Lock()
@@ -84,7 +97,17 @@ def scale_lux_to_brightness(lux):
     return clamp(brightness, BRIGHTNESS_MIN, BRIGHTNESS_MAX)
 
 
-def set_display_brightness(value):
+def get_xrandr_env():
+    env = os.environ.copy()
+    env["DISPLAY"] = DISPLAY
+
+    if XAUTHORITY:
+        env["XAUTHORITY"] = XAUTHORITY
+
+    return env
+
+
+def set_display_brightness(value, log_errors=True):
     value = clamp(value, BRIGHTNESS_MIN, BRIGHTNESS_MAX)
 
     cmd = [
@@ -95,22 +118,38 @@ def set_display_brightness(value):
         f"{value:.2f}",
     ]
 
-    env = {
-        "DISPLAY": DISPLAY,
-    }
-
     try:
-        subprocess.run(cmd, env=env, check=True)
+        subprocess.run(
+            cmd,
+            env=get_xrandr_env(),
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        return True
+
     except subprocess.CalledProcessError as e:
-        print(f"[ERROR] xrandr failed: {e}")
+        if log_errors:
+            error_text = e.stderr.strip() if e.stderr else str(e)
+            print(f"[ERROR] xrandr failed for brightness {value:.2f}: {error_text}")
+        return False
+
+
+def wait_for_display_ready():
+    print("[START] Waiting for display/xrandr to become ready...")
+
+    while True:
+        if set_display_brightness(BRIGHTNESS_IDLE, log_errors=False):
+            print(f"[START] Display ready, brightness set to idle {BRIGHTNESS_IDLE:.2f}")
+            return
+
+        time.sleep(XRANDR_STARTUP_RETRY_SECONDS)
 
 
 def read_bh1750_lux(bus):
-    # BH1750 returns 2 bytes.
     data = bus.read_i2c_block_data(BH1750_ADDR, BH1750_CONTINUOUS_HIGH_RES_MODE, 2)
     raw = (data[0] << 8) | data[1]
-
-    # Per BH1750 datasheet: lux = raw / 1.2
     return raw / 1.2
 
 
@@ -118,8 +157,8 @@ def step_brightness_towards_target():
     global current_brightness
 
     with state_lock:
-        target = target_brightness
-        current = current_brightness
+        target = clamp(target_brightness, BRIGHTNESS_MIN, BRIGHTNESS_MAX)
+        current = clamp(current_brightness, BRIGHTNESS_MIN, BRIGHTNESS_MAX)
 
     if abs(current - target) < 0.001:
         return
@@ -129,23 +168,30 @@ def step_brightness_towards_target():
     else:
         new_value = max(current - BRIGHTNESS_STEP, target)
 
-    set_display_brightness(new_value)
+    new_value = clamp(new_value, BRIGHTNESS_MIN, BRIGHTNESS_MAX)
 
-    with state_lock:
-        current_brightness = new_value
+    if set_display_brightness(new_value):
+        with state_lock:
+            current_brightness = new_value
 
-    print(f"[BRIGHTNESS] {new_value:.2f}")
+        print(f"[BRIGHTNESS] {new_value:.2f}")
+    else:
+        print("[BRIGHTNESS] Not updated because xrandr failed")
 
 
 def motion_detected():
     global last_motion_time
 
+    now = time.monotonic()
+
+    if now - script_start_time < PIR_STARTUP_IGNORE_SECONDS:
+        print("[MOTION] Ignored during PIR startup stabilization")
+        return
+
     if pir is None:
         print("[MOTION] Ignored, PIR not initialized yet")
         return
 
-    # Confirm PIR signal with quick repeated samples.
-    # This helps ignore very short false triggers.
     for sample in range(PIR_CONFIRM_SAMPLES):
         if not pir.motion_detected:
             print(f"[MOTION] Ignored false trigger, sample {sample + 1} was low")
@@ -165,13 +211,12 @@ def main():
     global pir
 
     print("[START] Starting display brightness controller")
-    print(f"[START] Setting initial brightness to {BRIGHTNESS_IDLE:.2f}")
-
-    set_display_brightness(BRIGHTNESS_IDLE)
 
     with state_lock:
         current_brightness = BRIGHTNESS_IDLE
         target_brightness = BRIGHTNESS_IDLE
+
+    wait_for_display_ready()
 
     pir = MotionSensor(PIR_GPIO)
     pir.when_motion = motion_detected
@@ -186,15 +231,18 @@ def main():
         time.sleep(0.05)
 
         print("[READY] Sensors initialized")
+        print(f"[CONFIG] Brightness idle: {BRIGHTNESS_IDLE:.2f}")
+        print(f"[CONFIG] Brightness max: {BRIGHTNESS_MAX:.2f}")
+        print(f"[CONFIG] Brightness step: {BRIGHTNESS_STEP:.2f}")
         print(
             f"[CONFIG] PIR confirm: {PIR_CONFIRM_SAMPLES} samples, "
             f"{PIR_CONFIRM_SAMPLE_DELAY:.3f}s apart"
         )
+        print(f"[CONFIG] PIR startup ignore: {PIR_STARTUP_IGNORE_SECONDS}s")
 
         while True:
             now = time.monotonic()
 
-            # Read light sensor periodically.
             if now - last_light_read >= LIGHT_READ_SECONDS:
                 last_light_read = now
 
@@ -217,6 +265,8 @@ def main():
                     target_brightness = scaled_light_brightness
                 else:
                     target_brightness = BRIGHTNESS_IDLE
+
+                target_brightness = clamp(target_brightness, BRIGHTNESS_MIN, BRIGHTNESS_MAX)
 
             step_brightness_towards_target()
 

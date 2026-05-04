@@ -18,7 +18,7 @@ XRANDR_OUTPUT = "HDMI-1"
 # Brightness limits
 BRIGHTNESS_IDLE = 0.2
 BRIGHTNESS_MIN = 0.2
-BRIGHTNESS_MAX = 1.0
+BRIGHTNESS_MAX = 1.5
 
 # Light sensor scaling
 # Tune these based on your room.

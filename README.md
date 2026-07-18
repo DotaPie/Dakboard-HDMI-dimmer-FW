@@ -1,6 +1,6 @@
-# Dakboard HDMI Dimmer — Firmware
+# Dakboard HDMI Dimmer - Firmware
 
-Firmware for Raspberry Pi Zero 2W that controls HDMI display brightness based on ambient light and motion detection.
+Firmware for Raspberry Pi that controls HDMI display brightness based on ambient light and motion detection.
 
 Using a [Dakboard-HDMI-dimmer-HW](https://github.com/DotaPie/Dakboard-HDMI-dimmer-HW) with a BH1750 light sensor (I2C) and a PIR motion sensor.
 
@@ -27,7 +27,7 @@ After pulling updates, run:
 chmod +x redeploy.sh && sudo ./redeploy.sh
 ```
 
-This stops the service, copies updated files from `src/`, and restarts it — no reboot needed.
+This stops the service, copies updated files from `src/`, and restarts it - no reboot needed.
 
 ## Useful commands
 
